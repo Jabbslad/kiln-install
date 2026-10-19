@@ -70,13 +70,13 @@ The client command does not update a server or its guest images.
 
 ## Dashboard preview
 
-[v0.4.4](https://github.com/Jabbslad/kiln/releases/tag/v0.4.4) includes the separate
-`kiln-dashboard-v0.4.4.tar.gz` static frontend and checksum. The installer does
+[v0.4.6](https://github.com/Jabbslad/kiln/releases/tag/v0.4.6) includes the separate
+`kiln-dashboard-v0.4.6.tar.gz` static frontend and checksum. The installer does
 not deploy it. Its `/boxes?preview=1` view uses labelled read-only examples;
 browser authentication and live VM controls are not integrated yet. See the
 [dashboard guide](https://github.com/Jabbslad/kiln/tree/main/web#readme).
 
-## Server: dedicated Ubuntu 24.04 or 26.04 x86-64/KVM
+## Server: dedicated Ubuntu 24.04, Ubuntu 26.04, or Debian 13 x86-64/KVM
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Jabbslad/kiln-install/main/install.sh | sh -s -- server
@@ -85,12 +85,17 @@ curl -fsSL https://raw.githubusercontent.com/Jabbslad/kiln-install/main/install.
 Use a systemd host with usable `/dev/kvm`, cgroup v2, 6 GiB currently available
 RAM and 24 GiB free on `/var/lib`, plus about 3 GiB temporary extraction space.
 16 GiB+ total RAM is recommended. Containers are not supported. The guest image
-remains Ubuntu 24.04 regardless of the supported host Ubuntu version.
+remains Ubuntu 24.04 on every supported host.
 
 **Running `server` authorizes installation or updating without further confirmation.** Use
 a root shell or an account with passwordless sudo; the script uses `sudo -n` and
-fails instead of asking for a password. It installs required Ubuntu packages
-(including Python), then checks resources/conflicts before creating accounts,
+fails instead of asking for a password. Installing and deploying Kiln is shell
+scripts, `deploy/install.sh` in the source tree. The bootstrap pins v0.4.6 and
+runs that archive's `install.sh` with bash. It does not run Python. When
+`sqlite3` is missing from `PATH`, it runs `apt-get update` and then
+`DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends --no-upgrade sqlite3`.
+When `sqlite3` is already on `PATH`, that pair of apt commands does not run.
+It then checks resources and conflicts before creating accounts,
 services, TLS credentials, and a 4 GiB warm Ubuntu template. Package configuration
 is non-interactive and retains existing configuration files. No VPN or API
 firewall opening is configured.
@@ -130,11 +135,19 @@ or blindly rerun setup.
 
 ### Automatic server updates
 
-Rerun the same `server` command. v0.4.4 updates healthy, standard Kiln v0.3.0,
-v0.3.2, v0.3.3, v0.4.0, v0.4.1, v0.4.2 or v0.4.3 installations and leaves identical v0.4.4 installations alone. It reuses
-the existing address and networking, skips apt, and preserves configuration,
-credentials, units, Firecracker, guest images, templates and VM disks. Explicit
-address/network options must agree with the installed configuration.
+Rerun the same `server` command. The shell installer accepts any strictly newer
+stable release. It compares major.minor.patch as integers, so 0.4.10 is newer
+than 0.4.4. It refuses a downgrade before stopping a service or writing a file.
+Installs older than 0.3.0 are unsupported. A minor or major bump also requires
+`min_upgrade_from` in the package `release.json`; a patch bump does not. An
+identical install is a no-op. The pinned v0.4.6 archive runs `install.sh`.
+
+The shell installer reuses the existing address and networking, and preserves
+configuration, credentials, units, Firecracker, guest images, templates and VM
+disks. Explicit address/network options must agree with the installed
+configuration. It does not copy or delete `/var/lib/kiln/runtime/snapshots/`.
+In `/usr/local/libexec` it replaces `kiln-host` and `kiln-api` by those exact
+names and leaves every other file, including `kiln-identity`, in place.
 
 The updater retains binaries under `/opt/kiln/upgrades/`, stops the gateway,
 waits up to 60 seconds for accepted operations, then restarts the management
@@ -209,7 +222,7 @@ It remains compatible with the 0.2.1 guest image.
 
 ## Trust and maintenance
 
-The bootstrap pins v0.4.4 release URLs and SHA-256 digests, validates archive contents,
+The bootstrap pins v0.4.6 release URLs and SHA-256 digests, validates archive contents,
 and downloads without authentication. Redirects are HTTPS-only and user curl
 configuration is disabled. Temporary files are removed on normal exit and handled
 signals. A checksum protects integrity under trust in this bootstrap publisher;
