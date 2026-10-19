@@ -19,10 +19,10 @@ assets() {
     # Updated only after reviewing the release and its checksums.
     cat <<'ASSETS'
 # BEGIN RELEASE ASSETS
-client:x86_64-unknown-linux-gnu 26959bf23aaa67ec37a362d5b191e621682da5ab98ab380184351418c869211d
-client:x86_64-apple-darwin 84e939dce3180e204a297bc6c4faa6e910a3a8abf574d9ffd646dfd7b5273416
-client:aarch64-apple-darwin b85538bdd08cf73d98670722056204da0a380b1d6714d111e51549576287e87e
-server:x86_64-unknown-linux-gnu b3e6eede468f652ddd25ece5efdf324c36ac3d947583f5a979e73925382d0cea
+client:x86_64-unknown-linux-gnu e9f360a28a00247f8e4311ff112d50d9f87299143b8369b786b547b4c9e38969
+client:x86_64-apple-darwin f671a29b9d0ae4367f991f058b9010254e8a0f2b0bcecb1dda51489c1c74fdd2
+client:aarch64-apple-darwin 86273cc6076c311f7373296471c388f70f8a34eb7d1e632b55cb71e9cbfc9280
+server:x86_64-unknown-linux-gnu 26e9c354b52eacb4a03aac54023ec51089c23022f12d6c7ef0024cc4da3e1abd
 # END RELEASE ASSETS
 ASSETS
 }
@@ -125,6 +125,20 @@ as_root() {
     if [ "$(id -u)" = 0 ]; then "$@"; else sudo -n "$@"; fi
 }
 
+resource_preflight() {
+    awk '/^MemAvailable:/ {kb=$2} END {exit !(kb+0 >= 6*1024*1024)}' /proc/meminfo \
+        || fail 'at least 6 GiB available host RAM is required for the initial 4 GiB template'
+    avail=$(df -B1 /var/lib | awk 'NR==2 {print $4}')
+    [ "${avail:-0}" -ge $((24 * 1024 * 1024 * 1024)) ] \
+        || fail 'at least 24 GiB free on /var/lib is required for initial copy-backend storage'
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import socket,sys; s=socket.socket(); s.bind((sys.argv[1], 8443))' "$address" \
+            || fail 'The server address must be assigned on this host and port 8443 must be free.'
+    fi
+    as_root sh -c '[ -r /dev/kvm ] && [ -w /dev/kvm ]' < /dev/null \
+        || fail 'Server requires read-write access to /dev/kvm.'
+}
+
 check_upgrade_paths() {
     if [ ! -f "$destination" ] || [ -L "$destination" ]; then
         fail 'Upgrade requires an existing regular file at ~/.local/bin/kiln; symbolic links are refused.'
@@ -215,6 +229,7 @@ install_server() {
         [ -f "$work/package/bin/kiln-network" ] || fail 'This pinned release has no guest networking; a guest-access release is required.'
         printf 'Networking requested: enable host IPv4 forwarding and filtered NAT via %s.\n' "$uplink"
     fi
+    resource_preflight
     printf '%s\n' \
         'Fresh Kiln installation. Fresh-host/reboot validation is outstanding.' \
         'Setup will use sudo to install Ubuntu packages: python3 openssl curl ca-certificates tar passwd.' \
@@ -233,7 +248,7 @@ install_server() {
 }
 
 main() {
-    version=0.4.2
+    version=0.4.3
     work='' staged='' backup_staged='' lock='' upgrade=false
     address='' uplink=${KILN_NETWORK_UPLINK:-} network=false existing_server=false
     trap cleanup EXIT
