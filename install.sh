@@ -19,10 +19,10 @@ assets() {
     # Updated only after reviewing the release and its checksums.
     cat <<'ASSETS'
 # BEGIN RELEASE ASSETS
-client:x86_64-unknown-linux-gnu 6d4b15357652708f0a0ccc771d4e800ef4b96af30b75be561015d1066eca06ef
-client:x86_64-apple-darwin c6cac894f7106e8b37e55bd80d603a58be9fd78176b0e462d5512c8be22d4cb3
-client:aarch64-apple-darwin 4d562237ffba9de9f58224c570dd22493a9ec0832ccb9b766e61925f242758cb
-server:x86_64-unknown-linux-gnu bbc358efeb977c9a023f6427c4482f8a974eb3b9b0cb714ce07b276eaa15aa1d
+client:x86_64-unknown-linux-gnu d043a3fb075bd1adfc2fc895c9a812d1f9986738ca6c974fe3c272b3f17641d7
+client:x86_64-apple-darwin d6c6c3126c95e3aad6f4d9f4a99f56c97a11a11e72c5f2091f0e646c27e99d62
+client:aarch64-apple-darwin 08f43ed3455e0673cbd8fb7468ff2268ddcae42ac03cf5b1d316552c1de7dfc3
+server:x86_64-unknown-linux-gnu b8bb88f3f2e7bade9ea17228d91dc8feb2bb8a0e0f2b34277e0adf4d99d0e06b
 # END RELEASE ASSETS
 ASSETS
 }
@@ -42,13 +42,13 @@ platform() {
             } END { exit !ok }' || fail 'Linux requires glibc 2.39 or newer.'
     fi
     if [ "$mode" = server ]; then
-        [ "$target" = x86_64-unknown-linux-gnu ] || fail 'Server requires Ubuntu 24.04 or 26.04 x86-64.'
+        [ "$target" = x86_64-unknown-linux-gnu ] || fail 'Server requires Ubuntu 24.04, Ubuntu 26.04, or Debian 13 x86-64.'
         [ -r /etc/os-release ] || fail 'Cannot identify server OS.'
         # shellcheck source=/dev/null
         . /etc/os-release
         case "${ID:-}:${VERSION_ID:-}" in
-            ubuntu:24.04|ubuntu:26.04) ;;
-            *) fail 'Server requires Ubuntu 24.04 or 26.04 x86-64.' ;;
+            ubuntu:24.04|ubuntu:26.04|debian:13) ;;
+            *) fail 'Server requires Ubuntu 24.04, Ubuntu 26.04, or Debian 13 x86-64.' ;;
         esac
         [ -d /run/systemd/system ] || fail 'Server requires a booted systemd host.'
         # The provisioner checks actual KVM access under sudo, not this user's groups.
@@ -81,23 +81,28 @@ download() {
 extract() {
     # The packager emits only these regular files. Reject links, extra/duplicate
     # entries and path traversal before extraction, even after digest verification.
+    tar -tzf "$work/package.tar.gz" > "$work/names" || fail 'Invalid package archive.'
     if [ "$mode" = client ]; then
         printf 'kiln\n' > "$work/expected"
     else
-        cat > "$work/expected" <<'FILES'
+        grep -qx 'install.sh' "$work/names" || fail 'Unexpected archive contents.'
+        cat > "$work/expected" <<FILES
 bin/kiln-runtime
 bin/kiln
 bin/kiln-host
 bin/kiln-api
-install.py
+install.sh
 fetch-firecracker.sh
 README.md
 docs/releases.md
 docs/remote-client.md
 docs/runtime.md
 docs/identity-service.md
+docs/runbooks/2026-10-19-public-door.md
 deploy/kiln-host.service
 deploy/kiln-api.service
+deploy/kiln-door.service
+deploy/enroll-dark-forge.sh
 deploy/host.example.json
 image/image.json
 image/inputs.json
@@ -105,12 +110,11 @@ image/vmlinux
 image/rootfs.ext4
 release.json
 FILES
-    fi
-    tar -tzf "$work/package.tar.gz" > "$work/names" || fail 'Invalid package archive.'
-    # Guest-access releases add one fixed-purpose network helper. Older pinned
-    # packages remain installable, but cannot opt in to networking.
-    if [ "$mode" = server ] && grep -qx 'bin/kiln-network' "$work/names"; then
-        printf 'bin/kiln-network\n' >> "$work/expected"
+        # Guest-access releases add one fixed-purpose network helper. Older pinned
+        # packages remain installable, but cannot opt in to networking.
+        if grep -qx 'bin/kiln-network' "$work/names"; then
+            printf 'bin/kiln-network\n' >> "$work/expected"
+        fi
     fi
     sort "$work/expected" > "$work/expected.sorted"
     sort "$work/names" > "$work/names.sorted"
@@ -131,10 +135,6 @@ resource_preflight() {
     avail=$(df -B1 /var/lib | awk 'NR==2 {print $4}')
     [ "${avail:-0}" -ge $((24 * 1024 * 1024 * 1024)) ] \
         || fail 'at least 24 GiB free on /var/lib is required for initial copy-backend storage'
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import socket,sys; s=socket.socket(); s.bind((sys.argv[1], 8443))' "$address" \
-            || fail 'The server address must be assigned on this host and port 8443 must be free.'
-    fi
     as_root sh -c '[ -r /dev/kvm ] && [ -w /dev/kvm ]' < /dev/null \
         || fail 'Server requires read-write access to /dev/kvm.'
 }
@@ -201,7 +201,7 @@ configure_server() {
             [ -n "$uplink" ] || fail 'Cannot detect one uplink; specify --network-uplink.'
         fi
     fi
-    # Validate before apt mutations; the Python provisioner rechecks this and binding.
+    # Validate before apt mutations. The installer rechecks the address and the bind.
     printf '%s\n' "$address" | awk -F . '
         NF == 4 {
             for(i=1;i<=4;i++) if($i !~ /^(0|[1-9][0-9]*)$/ || $i>255) exit 1
@@ -215,14 +215,26 @@ configure_server() {
     printf 'Server endpoint: https://%s:8443\n' "$address"
 }
 
+install_sqlite3_if_missing() {
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        as_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get update < /dev/null
+        as_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends --no-upgrade sqlite3 < /dev/null
+    fi
+}
+
+run_installer() {
+    [ -f "$work/package/install.sh" ] || fail 'Package has no installer.'
+    as_root bash "$work/package/install.sh" "$@" < /dev/null
+}
+
 install_server() {
     if [ "$existing_server" = true ]; then
-        command -v python3 >/dev/null 2>&1 || fail 'Existing Kiln installation requires python3.'
+        install_sqlite3_if_missing
         set -- --apply
         if [ -n "$address" ]; then set -- "$@" --address "$address"; fi
         if [ -n "$uplink" ]; then set -- "$@" --network-uplink "$uplink"; fi
         if [ "$network" = true ]; then set -- "$@" --network; fi
-        as_root python3 "$work/package/install.py" "$@" < /dev/null
+        run_installer "$@"
         return
     fi
     if [ -n "$uplink" ]; then
@@ -230,25 +242,30 @@ install_server() {
         printf 'Networking requested: enable host IPv4 forwarding and filtered NAT via %s.\n' "$uplink"
     fi
     resource_preflight
+    set -- openssl curl ca-certificates tar passwd
+    notice="$*"
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        notice="sqlite3 $notice"
+    fi
     printf '%s\n' \
         'Fresh Kiln installation. Fresh-host/reboot validation is outstanding.' \
-        'Setup will use sudo to install Ubuntu packages: python3 openssl curl ca-certificates tar passwd.' \
+        "Setup will use sudo to install Ubuntu packages: $notice." \
         'The server command authorizes setup; resource/conflict checks still run before creating kiln accounts and services.' \
         'A failed setup retains runtime state for diagnosis; do not delete it and blindly retry.'
     as_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update < /dev/null
-    set -- python3 openssl curl ca-certificates tar passwd
     if [ -n "$uplink" ]; then
         set -- "$@" iproute2 nftables util-linux
     fi
     as_root env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install --no-install-recommends -y \
         -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@" < /dev/null
+    install_sqlite3_if_missing
     set -- --address "$address" --apply
     if [ -n "$uplink" ]; then set -- "$@" --network-uplink "$uplink"; fi
-    as_root python3 "$work/package/install.py" "$@" < /dev/null
+    run_installer "$@"
 }
 
 main() {
-    version=0.4.4
+    version=0.4.7
     work='' staged='' backup_staged='' lock='' upgrade=false
     address='' uplink=${KILN_NETWORK_UPLINK:-} network=false existing_server=false
     trap cleanup EXIT
